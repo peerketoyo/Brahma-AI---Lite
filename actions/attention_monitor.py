@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover
     psutil = None
 
 try:
-    from pywinauto import Desktop
+    from pywinauto import Desktop  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
     Desktop = None
 
@@ -334,62 +334,22 @@ def _cleanup_current_audio() -> None:
 
 
 def speak_native(text: str) -> None:
-    global _current_player_alias, _current_audio_path
     text = (text or "").strip()
     if not text:
         return
-
     try:
-        import edge_tts
-    except Exception as exc:  # pragma: no cover
-        print(f"[AttentionMonitor] Edge TTS import failed: {exc}")
-        return
-
-    try:
-        _cleanup_current_audio()
-    except Exception:
-        pass
-
-    audio_path = os.path.join(tempfile.gettempdir(), f"brahma_edge_tts_{uuid.uuid4().hex}.mp3")
-    try:
-        # Use a male neural voice for app speech so daily briefing and alerts sound
-        # closer to Brahma's normal male audio output.
-        communicator = edge_tts.Communicate(text, voice="en-US-GuyNeural")
-        communicator.save_sync(audio_path)
-    except Exception as exc:  # pragma: no cover
-        print(f"[AttentionMonitor] Edge TTS generation failed: {exc}")
-        _cleanup_current_audio()
-        return
-
-    player_alias = f"brahma_tts_{uuid.uuid4().hex}"
-    try:
-        result = ctypes.windll.winmm.mciSendStringW(
-            f'open "{audio_path}" type mpegvideo alias {player_alias}',
-            None,
-            0,
-            None,
-        )
-        if result != 0:
-            raise RuntimeError(f"MCI open failed: {result}")
-
-        result = ctypes.windll.winmm.mciSendStringW(
-            f"play {player_alias} wait",
-            None,
-            0,
-            None,
-        )
-        if result != 0:
-            raise RuntimeError(f"MCI play failed: {result}")
-
-        _current_player_alias = player_alias
-        _current_audio_path = audio_path
-    except Exception as exc:  # pragma: no cover
-        print(f"[AttentionMonitor] Edge TTS playback failed: {exc}")
-        _cleanup_current_audio()
-        return
+        from voice_engine import speak_text
+        speak_text(text, wait=True)
+    except Exception as exc:
+        print(f"[AttentionMonitor] Voice playback failed: {exc}")
 
 
 def stop_native_speech() -> None:
+    try:
+        from voice_engine import stop_speech
+        stop_speech()
+    except Exception:
+        pass
     _cleanup_current_audio()
 
 

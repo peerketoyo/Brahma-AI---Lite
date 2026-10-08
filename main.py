@@ -51,6 +51,7 @@ from actions.game_updater      import game_updater
 from actions.attention_monitor import AttentionMonitor, speak_native, stop_native_speech, handle_call_action, read_event_preview
 from actions.daily_briefing import compile_daily_briefing
 from or_client import client as openrouter_client
+from ollama_client import client as ollama_client
 from workspace_store import store as workspace_store
 from smart_home.service import SmartHomeService
 from plugin_manager import PluginManager
@@ -80,8 +81,14 @@ LIVE_CONNECT_TIMEOUT = 12
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    try:
+        if API_CONFIG_PATH.exists():
+            with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("gemini_api_key", "").strip()
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_API_KEY", "")
 
 
 def _is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
@@ -230,8 +237,9 @@ def _gemini_text_reply(prompt: str) -> str:
         http_options={"api_version": "v1beta"},
     )
     system_prompt = (
-        "You are Brahma AI - Lite, a concise, helpful desktop assistant. "
-        "Reply naturally and briefly. Do not mention internal implementation details."
+        "Je bent Jennifer, een scherpe, intelligente en vriendelijke desktop AI-assistent voor Windows. "
+        "Je standaard communicatietaal is altijd Nederlands. Reageer altijd in natuurlijk, vloeiend Nederlands, "
+        "tenzij de gebruiker je in het Engels aanspreekt. Blijf beknopt, direct en behulpzaam."
     )
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -315,6 +323,12 @@ def _wakeword_detected(text: str) -> bool:
     if not words:
         return False
     phrases = (
+        "jennifer",
+        "hey jennifer",
+        "hallo jennifer",
+        "hi jennifer",
+        "dag jennifer",
+        "ok jennifer",
         "brahma",
         "hey brahma",
         "hi brahma",
@@ -322,11 +336,12 @@ def _wakeword_detected(text: str) -> bool:
         "hey",
         "hi",
         "hello",
+        "hallo",
     )
     compact = " ".join(words)
     if compact in phrases or any(p in compact for p in phrases):
         return True
-    return any(word in {"brahma", "hey", "hi", "hello"} for word in words)
+    return any(word in {"jennifer", "brahma", "hey", "hi", "hello", "hallo"} for word in words)
 
 
 def _build_task_plan(text: str) -> list[str]:
@@ -1541,52 +1556,75 @@ class BrahmaLive:
             try:
                 self.ui.update_task_workspace(
                     status="Thinking",
-                    output="Brahma is drafting a direct reply.",
+                    output="Jennifer verwerkt je verzoek...",
                     percent=35,
                 )
             except Exception:
                 pass
             reply = ""
-            gemini_first = not self._use_openrouter_first
-            request_text = f"{memory_ctx}\n\nCurrent User Request:\n{text}" if memory_ctx else text
+            request_text = f"{memory_ctx}\n\nGebruikersvraag:\n{text}" if memory_ctx else text
+            jennifer_system_prompt = (
+                "Je bent Jennifer, een scherpe, intelligente en vriendelijke desktop AI-assistent voor Windows. "
+                "Je standaard communicatietaal is altijd Nederlands. Reageer altijd in natuurlijk, vloeiend Nederlands, "
+                "tenzij de gebruiker je in het Engels aanspreekt. Blijf beknopt, direct en behulpzaam."
+            )
 
-            if gemini_first:
+            # 1. Lokale AI via Ollama (Privacy-vriendelijk en lokaal)
+            if ollama_client.is_available():
+                try:
+                    reply = ollama_client.chat(request_text, system=jennifer_system_prompt)
+                    if reply:
+                        print(f"[JENNIFER] 🏠 Lokaal beantwoord via Ollama ({ollama_client.get_preferred_model()})")
+                except Exception as e:
+                    print(f"[JENNIFER] ⚠️ Ollama fallback mislukt: {e}")
+
+            # 2. Cloud fallback via Gemini als Ollama geen antwoord gaf
+            if not reply:
                 try:
                     reply = _gemini_text_reply(request_text)
+                    if reply:
+                        print("[JENNIFER] ☁️ Beantwoord via Gemini")
                 except Exception as e:
-                    print(f"[BRAHMA] ⚠️ Gemini fallback failed: {e}")
+                    print(f"[JENNIFER] ⚠️ Gemini fallback mislukt: {e}")
                     if _is_gemini_limit_error(e):
                         self._use_openrouter_first = True
 
+            # 3. Cloud fallback via OpenRouter
             if not reply:
                 try:
                     reply = openrouter_client.chat(
                         request_text,
-                        system=(
-                            "You are Brahma AI - Lite, a concise, helpful desktop assistant. "
-                            "Reply naturally and briefly. Do not mention internal implementation details."
-                        ),
+                        system=jennifer_system_prompt,
                     )
+                    if reply:
+                        print("[JENNIFER] 🌐 Beantwoord via OpenRouter")
                 except Exception as e:
-                    print(f"[BRAHMA] ⚠️ OpenRouter fallback failed: {e}")
-                    if gemini_first and not self._use_openrouter_first and _is_gemini_limit_error(e):
-                        self._use_openrouter_first = True
+                    print(f"[JENNIFER] ⚠️ OpenRouter fallback mislukt: {e}")
+
             reply = (reply or "").strip()
             if not reply:
-                reply = "I’m ready, sir."
-            self.ui.write_log(f"Brahma AI: {reply}")
+                reply = "Ik sta voor je klaar. Hoe kan ik je helpen?"
+            self.ui.write_log(f"Jennifer AI: {reply}")
+
+            # Spraakweergave via tweetalige stem (optioneel wanneer niet gedempt)
+            if not self.ui.muted:
+                try:
+                    threading.Thread(target=speak_native, args=(reply,), daemon=True).start()
+                except Exception:
+                    pass
+
             try:
-                self.ui.finish_task_workspace(reply, "Reply delivered.", 100)
+                self.ui.finish_task_workspace(reply, "Antwoord gereed.", 100)
             except Exception:
                 pass
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
         except Exception as e:
-            msg = f"Fallback reply failed: {e}"
-            print(f"[BRAHMA] ⚠️ {msg}")
+            msg = f"Antwoord mislukt: {e}"
+            print(f"[JENNIFER] ⚠️ {msg}")
             self.ui.write_log(f"ERR: {msg}")
             try:
-                self.ui.finish_task_workspace(msg, "Reply failed.", 100)
+                self.ui.finish_task_workspace(msg, "Fout opgetreden.", 100)
             except Exception:
                 pass
             if not self.ui.muted:

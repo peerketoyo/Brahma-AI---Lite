@@ -2,6 +2,7 @@ import ctypes
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -19,14 +20,15 @@ _current_audio_path: Optional[str] = None
 _current_player_alias: Optional[str] = None
 _speech_lock = threading.Lock()
 
-# Heuristic lists for language identification
+# Heuristic lists for language identification (Dutch as primary base)
 DUTCH_MARKERS = {
     "de", "het", "een", "en", "is", "van", "te", "dat", "die", "voor", "niet",
     "met", "op", "zijn", "was", "we", "je", "ze", "er", "maar", "als", "om",
     "naar", "over", "door", "kan", "kunnen", "zal", "zou", "heeft", "hebben",
     "hallo", "goedemorgen", "goedemiddag", "goedenavond", "alsjeblieft",
     "alstublieft", "bedankt", "welkom", "tot", "ziens", "ik", "ben", "jennifer",
-    "wat", "kan", "helpen", "vandaag", "begrepen", "natuurlijk", "zeker"
+    "wat", "kan", "helpen", "vandaag", "begrepen", "natuurlijk", "zeker", "klaar",
+    "geen", "probleem", "graag", "gedaan"
 }
 
 ENGLISH_MARKERS = {
@@ -38,7 +40,7 @@ ENGLISH_MARKERS = {
 }
 
 def detect_language(text: str) -> str:
-    """Return 'nl' if Dutch, 'en' if English."""
+    """Return 'nl' if Dutch (default base), 'en' if English."""
     cleaned = re.sub(r"[^a-zA-Z\s]", " ", (text or "").lower())
     words = set(cleaned.split())
     if not words:
@@ -47,17 +49,18 @@ def detect_language(text: str) -> str:
     nl_count = sum(1 for w in words if w in DUTCH_MARKERS)
     en_count = sum(1 for w in words if w in ENGLISH_MARKERS)
 
-    if nl_count >= en_count:
-        return "nl"
-    return "en"
+    # Defaults to Dutch ('nl') unless clear predominance of English words
+    if en_count > nl_count and en_count >= 2:
+        return "en"
+    return "nl"
 
 def get_voice_for_text(text: str, override_voice: Optional[str] = None) -> str:
     if override_voice:
         return override_voice
     lang = detect_language(text)
-    if lang == "nl":
-        return DUTCH_FEMALE_VOICE
-    return ENGLISH_FEMALE_VOICE
+    if lang == "en":
+        return ENGLISH_FEMALE_VOICE
+    return DUTCH_FEMALE_VOICE
 
 def _cleanup_audio():
     global _current_player_alias, _current_audio_path
@@ -82,21 +85,38 @@ def stop_speech() -> None:
     with _speech_lock:
         _cleanup_audio()
 
+def speak_windows_sapi(text: str) -> bool:
+    """Fallback Windows speech synthesis using System.Speech."""
+    try:
+        clean_text = text.replace("'", " ").replace('"', ' ').replace("\n", " ")
+        ps_cmd = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{clean_text}')"
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd], capture_output=True, timeout=20)
+        return True
+    except Exception as exc:
+        logger.error(f"[VoiceEngine] Windows SAPI speech failed: {exc}")
+        return False
+
 def speak_text(text: str, voice: Optional[str] = None, wait: bool = True) -> bool:
     """
-    Synthesize and play speech using Edge TTS with Windows native MCI audio player.
-    Automatically chooses Dutch or English female neural voice unless overridden.
+    Synthesize and play speech.
+    Uses Edge TTS (FennaNeural for Dutch / AriaNeural for English) if available,
+    falling back to Windows System.Speech.
     """
     global _current_audio_path, _current_player_alias
     text = (text or "").strip()
     if not text:
         return False
 
+    has_edge_tts = False
     try:
-        import edge_tts
+        import edge_tts  # type: ignore[import-not-found]
+        has_edge_tts = True
     except ImportError:
-        logger.warning("[VoiceEngine] edge_tts package is not installed.")
-        return False
+        has_edge_tts = False
+
+    if not has_edge_tts:
+        logger.info("[VoiceEngine] edge_tts not available, using Windows SAPI voice.")
+        return speak_windows_sapi(text)
 
     with _speech_lock:
         _cleanup_audio()
@@ -107,9 +127,9 @@ def speak_text(text: str, voice: Optional[str] = None, wait: bool = True) -> boo
             communicator = edge_tts.Communicate(text, voice=selected_voice)
             communicator.save_sync(audio_path)
         except Exception as exc:
-            logger.error(f"[VoiceEngine] Edge TTS generation failed: {exc}")
+            logger.warning(f"[VoiceEngine] Edge TTS generation failed: {exc}. Falling back to SAPI.")
             _cleanup_audio()
-            return False
+            return speak_windows_sapi(text)
 
         player_alias = f"jennifer_tts_{uuid.uuid4().hex}"
         try:
@@ -134,6 +154,6 @@ def speak_text(text: str, voice: Optional[str] = None, wait: bool = True) -> boo
             )
             return True
         except Exception as exc:
-            logger.error(f"[VoiceEngine] MCI playback failed: {exc}")
+            logger.warning(f"[VoiceEngine] MCI playback failed: {exc}. Falling back to SAPI.")
             _cleanup_audio()
-            return False
+            return speak_windows_sapi(text)
