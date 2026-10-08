@@ -40,7 +40,7 @@ def _get_api_key() -> str:
     except Exception:
         pass
     return os.environ.get("GEMINI_API_KEY", "")
-
+  
 
 def _gemini_client():
     genai.configure(api_key=_get_api_key())
